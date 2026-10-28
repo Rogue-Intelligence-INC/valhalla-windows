@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.obj
+*.pdb
+*.ilk
+crash.log
+out.log
+conversation.json
+settings.json
