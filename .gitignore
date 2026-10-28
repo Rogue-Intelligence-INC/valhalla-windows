@@ -8,3 +8,8 @@ crash.log
 out.log
 conversation.json
 settings.json
+knowledge.json
+conversations/
+native/kb_test.exe
+native/agent_test.exe
+native-layout.txt

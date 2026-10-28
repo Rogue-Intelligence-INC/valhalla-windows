@@ -147,7 +147,8 @@ std::string chat_prompt(
     std::string tools;
     if (allow_control) {
         tools = "When the user wants the screen or this computer operated, end the reply with lines after [[action]]. "
-                "Allowed lines only: read_screen ; click X Y ; move X Y ; type TEXT ; key enter|tab|esc|up|down|left|right ; scroll N. "
+                "Allowed lines only: read_screen ; click X Y ; click_text LABEL ; move X Y ; type TEXT ; key enter|tab|esc|up|down|left|right ; scroll N. "
+                "Coordinates in the screen reading are screen pixels. Prefer click_text when a control or OCR line names the target. "
                 "Do not invent other commands.\n\n";
     }
     return "You are Valhalla in an ongoing conversation. "

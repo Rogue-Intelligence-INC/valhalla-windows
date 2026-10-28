@@ -12,7 +12,10 @@ The Python files (`app.py`, `lift_engine.py`, `i18n.py`, `models_catalog.py`, `s
 
 The shell has a chat surface and three settings panels:
 
-- **Knowledge** — one fact per line. Chat retrieves from those lines.
+- **Knowledge** — handwritten notes, one fact per line, plus an industry import. Imported files are stored separately from notes and marked pending review. Chat searches the imported passages for the question. Formats: txt, md, csv, tsv, json, jsonl, html, xml, rtf, log, docx, xlsx, pptx, and pdf. The library is `knowledge.json` beside the executable and is not committed.
+- **Chats** — the left column keeps a list of conversations. New chat adds one instead of erasing the previous one. Right-click a row to delete it.
+- **Screen** — Recognize captures the desktop behind the window, reads it with Windows OCR, and lists UI Automation controls with screen coordinates.
+- **Computer control** — off until it is switched on. Actions the model may emit are `read_screen`, `click`, `click_text`, `move`, `type`, `key`, and `scroll`.
 - **Models** — Qwen2.5 Instruct checkpoints, download and select.
 - **General** — language, answer strategy, and whether later turns keep the structure session.
 
@@ -41,4 +44,6 @@ The script expects the Visual Studio 2022 Build Tools `vcvars64.bat` at the defa
 启动.bat
 ```
 
-nlohmann/json in `native/third_party` is included so the native shell can build. That header keeps its own license notice.
+nlohmann/json in `native/third_party` is included so the native shell can build. That header keeps its own license notice. Inflating docx, xlsx, pptx, and pdf streams uses `puff` by Mark Adler (`native/third_party/puff`), kept with its own notice.
+
+`native\build.bat` also builds `native\kb_test.exe`, which checks the importers and retrieval without starting the model.

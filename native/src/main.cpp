@@ -1,7 +1,10 @@
 #include "desktop.h"
 #include "engine.h"
+#include "knowledge.h"
+#include "sessions.h"
 #include "utf.h"
 
+#include <commdlg.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <dwmapi.h>
@@ -22,6 +25,7 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 using namespace Gdiplus;
@@ -37,9 +41,13 @@ enum {
     ID_CONTROL = 106,
     ID_TASK = 107,
     ID_PROBE = 108,
+    ID_IMPORT = 109,
     ID_NAV0 = 110,
     ID_NAV1 = 111,
     ID_NAV2 = 112,
+    ID_NAV3 = 113,
+    ID_RECOGNIZE = 114,
+    ID_ARM = 115,
     ID_SESSION = 120,
     ID_LANG = 130,
     ID_STRATEGY = 131,
@@ -110,10 +118,13 @@ struct App {
     HWND status = nullptr;
     HWND back = nullptr;
     HWND header = nullptr;
-    HWND nav[3] = {};
+    HWND nav[4] = {};
     HWND knowledge_title = nullptr;
     HWND knowledge_help = nullptr;
+    HWND import_button = nullptr;
     HWND knowledge = nullptr;
+    KnowledgeBase kb;
+    std::wstring kb_path;
     HWND models_title = nullptr;
     HWND models_help = nullptr;
     HWND model_title[4] = {};
@@ -129,6 +140,16 @@ struct App {
     HWND session_help = nullptr;
     HWND runtime = nullptr;
     HWND probe_button = nullptr;
+    HWND rail = nullptr;
+    HWND desktop_title = nullptr;
+    HWND desktop_help = nullptr;
+    HWND recognize_button = nullptr;
+    HWND arm_button = nullptr;
+    HWND desktop_view = nullptr;
+    ConversationLibrary library;
+    ScreenReading reading;
+    int rail_scroll = 0;
+    bool layout_check = false;
     bool mica = false;
     std::wstring probe_text;
     HFONT font = nullptr;
@@ -178,7 +199,7 @@ const wchar_t* Tr(const wchar_t* key) {
         {L"badge_talk", L"续写", L"Continued"},
         {L"badge_mcq", L"选择题混合", L"Hybrid choice"},
         {L"badge_multi", L"多跳后作答", L"Multi-hop, then written"},
-        {L"screen", L"读取屏幕", L"Read screen"},
+        {L"screen", L"识别屏幕", L"Recognize"},
         {L"control", L"控制电脑", L"Control"},
         {L"control_on", L"控制中", L"Control on"},
         {L"screen_done", L"已带上屏幕", L"Screen attached"},
@@ -195,13 +216,31 @@ const wchar_t* Tr(const wchar_t* key) {
         {L"framework_loading", L"正在启动 Valhalla，模型只载入这一次…", L"Starting Valhalla. The model loads once…"},
         {L"framework_ready", L"模型已常驻，后续对话不再重新加载。", L"The model is resident. Later turns will not load it again."},
         {L"empty_chat", L"问一件事，或直接布置任务。", L"Ask something, or give it a task."},
-        {L"need_knowledge", L"知识库是空的。打开设置，在「知识库」里写上语料。", L"The knowledge base is empty. Add lines under Settings, Knowledge."},
+        {L"need_knowledge", L"知识库是空的。打开设置，写上语料，或导入行业资料。", L"The knowledge base is empty. Add notes under Settings, or import industry files."},
         {L"need_model", L"这个模型还没有权重。到设置的「模型」页下载。", L"That model has no weights yet. Download it under Settings, Models."},
         {L"nav_knowledge", L"知识库", L"Knowledge"},
         {L"nav_models", L"模型", L"Models"},
         {L"nav_general", L"综合", L"General"},
+        {L"nav_desktop", L"桌面", L"Desktop"},
+        {L"recognizing", L"正在识别屏幕…", L"Reading the screen…"},
+        {L"rail_chats", L"对话", L"Chats"},
+        {L"rail_screen", L"屏幕识别", L"Screen"},
+        {L"rail_ocr", L"OCR", L"OCR"},
+        {L"rail_control", L"计算机控制", L"Computer control"},
+        {L"rail_off", L"关", L"Off"},
+        {L"rail_on", L"开", L"On"},
+        {L"rail_none", L"未识别", L"Not read"},
+        {L"desktop_title", L"屏幕与控制", L"Screen and control"},
+        {L"desktop_help", L"识别会暂时让出窗口，截取当前桌面，用 Windows OCR 读出文字，并列出控件坐标。计算机控制默认关闭，打开后才会执行点击、输入和按键。", L"Recognize steps aside, captures the desktop, reads it with Windows OCR, and lists control coordinates. Computer control stays off until you turn it on."},
+        {L"arm_on", L"控制已打开", L"Control is on"},
+        {L"arm_off", L"允许控制电脑", L"Allow computer control"},
+        {L"delete_chat", L"删除这则对话？", L"Delete this conversation?"},
+        {L"delete_title", L"对话", L"Conversation"},
         {L"knowledge_title", L"知识库", L"Knowledge"},
-        {L"knowledge_help", L"一行一条。命中的句子会作为回答依据，不会只把原文碎片贴出来。", L"One fact per line. A hit becomes the basis of the reply, not a pasted fragment."},
+        {L"knowledge_help", L"手写语料一行一条。行业资料用下方按钮导入，支持 txt、md、csv、json、html、xml、rtf、docx、xlsx、pptx、pdf。导入内容标记为待核对。", L"Notes stay one fact per line. Import industry files below: txt, md, csv, json, html, xml, rtf, docx, xlsx, pptx, and pdf. Imported material stays pending review."},
+        {L"import_btn", L"导入行业资料", L"Import industry files"},
+        {L"import_title", L"行业名称", L"Industry name"},
+        {L"import_hint", L"这一批资料属于哪个行业？", L"Which industry are these files from?"},
         {L"models_title", L"模型", L"Models"},
         {L"models_help", L"只列出本机解码器能加载的免费 Qwen2.5 Instruct。", L"Free Qwen2.5 Instruct checkpoints this decoder can load."},
         {L"general_title", L"综合", L"General"},
@@ -286,6 +325,20 @@ void store_transcript() {
     transcript.history = g.history;
     transcript.session_json = g.session_json;
     save_transcript(g.transcript_path, transcript);
+    if (!g.library.active.empty()) {
+        std::wstring title = Tr(L"new_chat");
+        for (const auto& line : g.messages) {
+            std::wstring text = trim_copy(line.text);
+            if (!line.user || text.empty()) continue;
+            auto cut = text.find(L'\n');
+            if (cut != std::wstring::npos) text.resize(cut);
+            if (text.size() > 32) text.resize(32);
+            title = text;
+            break;
+        }
+        note_conversation(g.library, g.library.active, wide_to_utf8(title));
+        if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
+    }
 }
 
 void restore_transcript() {
@@ -410,6 +463,87 @@ const wchar_t* strategy_delta_key(int index) {
     return keys[index];
 }
 
+struct IndustryPrompt {
+    HWND edit = nullptr;
+    std::wstring value;
+    bool accepted = false;
+};
+
+LRESULT CALLBACK IndustryProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+    auto* state = reinterpret_cast<IndustryPrompt*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+        case WM_CREATE: {
+            auto* created = reinterpret_cast<CREATESTRUCTW*>(lp);
+            state = reinterpret_cast<IndustryPrompt*>(created->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            CreateWindowExW(0, L"STATIC", Tr(L"import_hint"), WS_CHILD | WS_VISIBLE, 16, 14, 360, 22, hwnd, nullptr, g.instance, nullptr);
+            state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 16, 42, 360, 26, hwnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(1)), g.instance, nullptr);
+            CreateWindowExW(0, L"BUTTON", Tr(L"import_btn"), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 196, 82, 180, 30, hwnd,
+                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g.instance, nullptr);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (!state) break;
+            if (LOWORD(wp) == IDOK) {
+                state->value = trim_copy(window_text(state->edit));
+                state->accepted = true;
+                DestroyWindow(hwnd);
+            } else if (LOWORD(wp) == IDCANCEL) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wp, lp);
+}
+
+bool ask_industry(HWND owner, IndustryPrompt& prompt) {
+    WNDCLASSW window{};
+    window.lpfnWndProc = IndustryProc;
+    window.hInstance = g.instance;
+    window.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    window.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    window.lpszClassName = L"ValhallaIndustry";
+    RegisterClassW(&window);
+    RECT parent{};
+    GetWindowRect(owner, &parent);
+    int width = 408;
+    int height = 168;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ValhallaIndustry", Tr(L"import_title"), WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                parent.left + 80, parent.top + 80, width, height, owner, nullptr, g.instance, &prompt);
+    if (!dlg) return false;
+    EnableWindow(owner, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(prompt.edit);
+    while (IsWindow(dlg)) {
+        MSG msg;
+        if (!GetMessageW(&msg, nullptr, 0, 0)) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (msg.message == WM_KEYDOWN && (msg.hwnd == prompt.edit || msg.hwnd == dlg)) {
+            if (msg.wParam == VK_RETURN) {
+                SendMessageW(dlg, WM_COMMAND, IDOK, 0);
+                continue;
+            }
+            if (msg.wParam == VK_ESCAPE) {
+                DestroyWindow(dlg);
+                continue;
+            }
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return prompt.accepted;
+}
+
 void pull_knowledge() {
     std::string text = trim_utf8(from_edit(window_text(g.knowledge)));
     if (text != g.settings.knowledge) {
@@ -419,6 +553,53 @@ void pull_knowledge() {
         g.history.clear();
         store_transcript();
     }
+    sync_notes(g.kb, text);
+    if (!g.kb_path.empty()) save_knowledge(g.kb_path, g.kb);
+}
+
+void import_industry_dialog(HWND owner) {
+    IndustryPrompt prompt;
+    if (!ask_industry(owner, prompt)) return;
+    std::wstring domain = prompt.value.empty() ? L"industry" : prompt.value;
+    std::vector<wchar_t> buffer(64 * 1024, L'\0');
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Industry files\0*.txt;*.md;*.csv;*.tsv;*.json;*.jsonl;*.html;*.htm;*.xml;*.rtf;*.log;*.docx;*.xlsx;*.pptx;*.pdf\0All files\0*.*\0";
+    ofn.lpstrFile = buffer.data();
+    ofn.nMaxFile = static_cast<DWORD>(buffer.size());
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = Tr(L"import_btn");
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    std::vector<std::wstring> files;
+    std::wstring directory = buffer.data();
+    wchar_t* cursor = buffer.data() + directory.size() + 1;
+    if (*cursor == L'\0') files.push_back(directory);
+    else {
+        while (*cursor) {
+            files.push_back(directory + L"\\" + cursor);
+            cursor += wcslen(cursor) + 1;
+        }
+    }
+    pull_knowledge();
+    ImportReport total;
+    std::string domain_utf8 = wide_to_utf8(domain);
+    for (const auto& file : files) {
+        ImportReport one = import_industry_file(g.kb, file, domain_utf8);
+        total.added += one.added;
+        total.recognized += one.recognized;
+        total.failed += one.failed;
+    }
+    save_knowledge(g.kb_path, g.kb);
+    g.session_json.clear();
+    sync_text();
+    wchar_t message[320];
+    swprintf_s(message,
+               g.lang == L"zh" ? L"导入完成：新增 %d 条，库中已有 %d 条，%d 个文件没有读出。"
+                               : L"Import finished: %d added, %d already stored, %d files unread.",
+               total.added, total.recognized, total.failed);
+    MessageBoxW(owner, message, Tr(L"import_btn"), MB_OK);
 }
 
 void fill_choices() {
@@ -500,8 +681,17 @@ void sync_text() {
     SetWindowTextW(g.nav[0], Tr(L"nav_knowledge"));
     SetWindowTextW(g.nav[1], Tr(L"nav_models"));
     SetWindowTextW(g.nav[2], Tr(L"nav_general"));
+    SetWindowTextW(g.nav[3], Tr(L"nav_desktop"));
     SetWindowTextW(g.knowledge_title, Tr(L"knowledge_title"));
-    SetWindowTextW(g.knowledge_help, Tr(L"knowledge_help"));
+    {
+        std::wstring help = Tr(L"knowledge_help");
+        wchar_t extra[160];
+        swprintf_s(extra, g.lang == L"zh" ? L" 已导入 %d 个行业、%d 条。" : L" Imported: %d industries, %d records.", industry_domains(g.kb),
+                   industry_records(g.kb));
+        help += extra;
+        SetWindowTextW(g.knowledge_help, help.c_str());
+    }
+    SetWindowTextW(g.import_button, Tr(L"import_btn"));
     SetWindowTextW(g.models_title, Tr(L"models_title"));
     SetWindowTextW(g.models_help, Tr(L"models_help"));
     SetWindowTextW(g.general_title, Tr(L"general_title"));
@@ -515,6 +705,10 @@ void sync_text() {
     runtime += binary.empty() ? Tr(L"binary_missing") : std::wstring(Tr(L"binary_ok")) + L"  " + binary;
     SetWindowTextW(g.runtime, runtime.c_str());
     SetWindowTextW(g.probe_button, Tr(L"probe"));
+    SetWindowTextW(g.desktop_title, Tr(L"desktop_title"));
+    SetWindowTextW(g.desktop_help, Tr(L"desktop_help"));
+    SetWindowTextW(g.recognize_button, Tr(L"screen"));
+    SetWindowTextW(g.arm_button, g.settings.allow_control ? Tr(L"arm_on") : Tr(L"arm_off"));
     fill_choices();
     refresh_models();
     InvalidateRect(g.hwnd, nullptr, TRUE);
@@ -528,10 +722,11 @@ void apply_fonts() {
     SendMessageW(g.title, WM_SETFONT, reinterpret_cast<WPARAM>(title), TRUE);
     SendMessageW(g.header, WM_SETFONT, reinterpret_cast<WPARAM>(title), TRUE);
     HWND body_controls[] = {g.composer, g.knowledge, g.knowledge_title, g.models_title, g.general_title, g.language_label,
-                            g.language, g.strategy_label, g.strategy, g.session_check, g.probe_button};
+                            g.language, g.strategy_label, g.strategy, g.session_check, g.probe_button, g.import_button,
+                            g.desktop_title, g.recognize_button, g.arm_button};
     for (HWND hwnd : body_controls)
         if (hwnd) SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(body), TRUE);
-    HWND small_controls[] = {g.hint, g.status, g.knowledge_help, g.models_help, g.strategy_detail, g.session_help, g.runtime};
+    HWND small_controls[] = {g.hint, g.status, g.knowledge_help, g.models_help, g.strategy_detail, g.session_help, g.runtime, g.desktop_help};
     for (HWND hwnd : small_controls)
         if (hwnd) SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(small_font), TRUE);
     for (int i = 0; i < 4; ++i) {
@@ -546,21 +741,34 @@ void apply_fonts() {
     g.font_small = small_font;
 }
 
+int rail_width() {
+    RECT client{};
+    if (g.hwnd) GetClientRect(g.hwnd, &client);
+    if (client.right > 0 && client.right < S(980)) return S(208);
+    return S(248);
+}
+
 void layout() {
     RECT client{};
     GetClientRect(g.hwnd, &client);
     int width = client.right;
     int height = client.bottom;
-    int margin = S(28);
+    int rail = g.page == 0 ? rail_width() : 0;
+    if (g.rail) {
+        if (g.page == 0) MoveWindow(g.rail, 0, 0, rail, std::max(1, height), TRUE);
+        else MoveWindow(g.rail, 0, 0, 0, 0, TRUE);
+    }
+    int margin = S(20);
     int gap = S(8);
-    int column = std::min(S(760), std::max(S(420), width - margin * 2));
-    int origin = std::max(margin, (width - column) / 2);
+    int area_w = std::max(10, width - rail);
+    int column = std::min(S(760), std::max(S(280), area_w - margin * 2));
+    int origin = rail + std::max(margin, (area_w - column) / 2);
     int settings_w = S(72);
     int new_w = S(84);
-    int settings_x = std::max(margin, width - margin - settings_w);
-    int new_x = std::max(margin, settings_x - gap - new_w);
-    int title_w = std::max(S(80), new_x - gap - margin);
-    MoveWindow(g.title, margin, S(14), title_w, S(28), TRUE);
+    int settings_x = std::max(origin, width - margin - settings_w);
+    int new_x = std::max(origin, settings_x - gap - new_w);
+    int title_w = std::max(0, new_x - gap - origin);
+    MoveWindow(g.title, origin, S(14), title_w, S(28), TRUE);
     MoveWindow(g.hint, 0, 0, 0, 0, TRUE);
     MoveWindow(g.new_chat, new_x, S(12), new_w, S(32), TRUE);
     MoveWindow(g.settings_button, settings_x, S(12), settings_w, S(32), TRUE);
@@ -570,36 +778,44 @@ void layout() {
     int composer_top = height - well_h - S(36);
     if (composer_top < chat_top + S(80)) composer_top = chat_top + S(80);
     MoveWindow(g.status, origin, composer_top - status_h - S(6), column, status_h, TRUE);
-    MoveWindow(g.chat, 0, chat_top, std::max(10, width), std::max(10, composer_top - status_h - chat_top - S(10)), TRUE);
+    MoveWindow(g.chat, rail, chat_top, std::max(10, width - rail), std::max(10, composer_top - status_h - chat_top - S(10)), TRUE);
     int pad = S(16);
     int tool_h = S(32);
     int tool_y = composer_top + well_h - pad - tool_h;
     int edit_h = std::max(S(40), tool_y - composer_top - S(14));
     MoveWindow(g.composer, origin + pad, composer_top + S(14), std::max(10, column - pad * 2), edit_h, TRUE);
     SendMessageW(g.composer, 0x00D3, 3, MAKELPARAM(S(2), S(2)));
-    int chip_w = S(96);
+    int send_w = S(76);
+    int send_x = origin + column - pad - send_w;
+    int chip_gaps = gap * 2;
+    int chip_room = send_x - gap - (origin + pad) - chip_gaps;
+    int chip_w = chip_room / 3;
+    if (chip_w > S(112)) chip_w = S(112);
+    if (chip_w < S(48)) chip_w = S(48);
     int x = origin + pad;
     MoveWindow(g.screen_button, x, tool_y, chip_w, tool_h, TRUE);
     x += chip_w + gap;
     MoveWindow(g.control_button, x, tool_y, chip_w, tool_h, TRUE);
     x += chip_w + gap;
     MoveWindow(g.task_button, x, tool_y, chip_w, tool_h, TRUE);
-    int send_w = S(76);
-    int send_x = origin + column - pad - send_w;
     MoveWindow(g.send, send_x, tool_y, send_w, tool_h, TRUE);
 
     MoveWindow(g.back, S(20), S(16), S(88), S(36), TRUE);
     MoveWindow(g.header, S(124), S(16), S(320), S(36), TRUE);
-    for (int i = 0; i < 3; ++i) MoveWindow(g.nav[i], S(20), S(76) + i * S(48), S(180), S(40), TRUE);
+    for (int i = 0; i < 4; ++i) MoveWindow(g.nav[i], S(20), S(76) + i * S(44), S(180), S(36), TRUE);
     int left = S(224);
     int content_w = std::max(10, width - left - S(24));
     MoveWindow(g.knowledge_title, left, S(76), content_w, S(28), TRUE);
-    MoveWindow(g.knowledge_help, left, S(108), content_w, S(40), TRUE);
-    MoveWindow(g.knowledge, left, S(156), content_w, std::max(10, height - S(180)), TRUE);
+    MoveWindow(g.knowledge_help, left, S(108), content_w, S(64), TRUE);
+    MoveWindow(g.import_button, left, S(178), S(220), S(36), TRUE);
+    MoveWindow(g.knowledge, left, S(224), content_w, std::max(10, height - S(248)), TRUE);
     MoveWindow(g.models_title, left, S(76), content_w, S(28), TRUE);
     MoveWindow(g.models_help, left, S(108), content_w, S(40), TRUE);
+    int row_h = S(92);
+    int models_room = height - S(176);
+    if (models_room < 4 * row_h) row_h = std::max(S(68), models_room / 4);
     for (int i = 0; i < 4; ++i) {
-        int top = S(160) + i * S(92);
+        int top = S(160) + i * row_h;
         MoveWindow(g.model_title[i], left, top, content_w - S(120), S(24), TRUE);
         MoveWindow(g.model_note[i], left, top + S(26), content_w - S(120), S(36), TRUE);
         MoveWindow(g.model_button[i], left + content_w - S(108), top, S(100), S(36), TRUE);
@@ -614,6 +830,11 @@ void layout() {
     MoveWindow(g.session_help, left, S(332), content_w, S(36), TRUE);
     MoveWindow(g.runtime, left, S(372), content_w, S(96), TRUE);
     MoveWindow(g.probe_button, left, S(476), S(148), S(36), TRUE);
+    MoveWindow(g.desktop_title, left, S(76), content_w, S(28), TRUE);
+    MoveWindow(g.desktop_help, left, S(108), content_w, S(56), TRUE);
+    MoveWindow(g.recognize_button, left, S(172), S(140), S(36), TRUE);
+    MoveWindow(g.arm_button, left + S(152), S(172), S(180), S(36), TRUE);
+    MoveWindow(g.desktop_view, left, S(220), content_w, std::max(10, height - S(244)), TRUE);
     g.chat_width = 0;
 }
 
@@ -630,14 +851,17 @@ void apply_page() {
     show_item(g.composer, chat);
     show_item(g.send, chat);
     show_item(g.status, chat);
+    show_item(g.rail, chat);
     show_item(g.back, !chat);
     show_item(g.header, !chat);
     for (HWND hwnd : g.nav) show_item(hwnd, !chat);
     bool knowledge = !chat && g.section == 0;
     bool models = !chat && g.section == 1;
     bool general = !chat && g.section == 2;
+    bool desktop = !chat && g.section == 3;
     show_item(g.knowledge_title, knowledge);
     show_item(g.knowledge_help, knowledge);
+    show_item(g.import_button, knowledge);
     show_item(g.knowledge, knowledge);
     show_item(g.models_title, models);
     show_item(g.models_help, models);
@@ -655,6 +879,12 @@ void apply_page() {
     show_item(g.session_help, general);
     show_item(g.runtime, general);
     show_item(g.probe_button, general);
+    show_item(g.desktop_title, desktop);
+    show_item(g.desktop_help, desktop);
+    show_item(g.recognize_button, desktop);
+    show_item(g.arm_button, desktop);
+    show_item(g.desktop_view, desktop);
+    layout();
     refresh_models();
     for (HWND hwnd : g.nav) InvalidateRect(hwnd, nullptr, TRUE);
     InvalidateRect(g.hwnd, nullptr, TRUE);
@@ -678,7 +908,22 @@ void go_chat() {
     apply_page();
 }
 
-void clear_chat() {
+void load_active_conversation() {
+    g.transcript_path = conversation_file(g.library, g.library.active);
+    g.messages.clear();
+    g.history.clear();
+    g.session_json.clear();
+    g.scroll = 0;
+    g.stick = true;
+    g.chat_width = 0;
+    restore_transcript();
+    if (g.chat) InvalidateRect(g.chat, nullptr, FALSE);
+    if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
+}
+
+void new_conversation() {
+    if (!g.library.root.empty()) store_transcript();
+    create_conversation(g.library);
     g.messages.clear();
     g.history.clear();
     g.session_json.clear();
@@ -686,9 +931,51 @@ void clear_chat() {
     g.scroll = 0;
     g.stick = true;
     g.chat_width = 0;
+    g.transcript_path = conversation_file(g.library, g.library.active);
     SetWindowTextW(g.status, g.framework_note.c_str());
     store_transcript();
     InvalidateRect(g.chat, nullptr, FALSE);
+}
+
+void open_conversation(const std::string& id) {
+    if (id == g.library.active) return;
+    store_transcript();
+    if (!select_conversation(g.library, id)) return;
+    load_active_conversation();
+    SetWindowTextW(g.status, g.framework_note.c_str());
+}
+
+void delete_conversation_at(const std::string& id) {
+    if (id == g.library.active) store_transcript();
+    delete_conversation(g.library, id);
+    load_active_conversation();
+}
+
+void go_desktop() {
+    pull_knowledge();
+    g.page = 1;
+    g.section = 3;
+    apply_page();
+}
+
+void recognize_now() {
+    if (g.busy) return;
+    SetWindowTextW(g.status, Tr(L"recognizing"));
+    UpdateWindow(g.hwnd);
+    g.reading = recognize_screen(g.hwnd);
+    g.screen_context = wide_to_utf8(g.reading.text);
+    if (g.desktop_view) SetWindowTextW(g.desktop_view, g.reading.text.c_str());
+    wchar_t status[180];
+    swprintf_s(status, g.lang == L"zh" ? L"OCR %d 行，控件 %d 个" : L"OCR %d lines, %d controls", g.reading.ocr_lines, g.reading.controls);
+    if (!g.reading.error.empty() && g.reading.ocr_lines == 0) status[0] = 0;
+    if (!g.reading.error.empty() && g.reading.ocr_lines == 0) {
+        std::wstring note = g.lang == L"zh" ? L"识别未完成：" : L"Recognize failed: ";
+        note += g.reading.error;
+        SetWindowTextW(g.status, note.c_str());
+    } else {
+        SetWindowTextW(g.status, status);
+    }
+    if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
 }
 
 void append_line(bool user, const std::wstring& text, const std::wstring& path) {
@@ -707,7 +994,7 @@ void send_chat() {
     if (g.busy) return;
     std::wstring question = trim_copy(window_text(g.composer));
     if (question.empty()) return;
-    if (trim_utf8(g.settings.knowledge).empty()) {
+    if (trim_utf8(g.settings.knowledge).empty() && !has_industry(g.kb)) {
         append_line(false, Tr(L"need_knowledge"), L"");
         return;
     }
@@ -725,7 +1012,7 @@ void send_chat() {
     InvalidateRect(g.chat, nullptr, FALSE);
     auto* job = new ChatDone{};
     job->question = question;
-    std::string knowledge = g.settings.knowledge;
+    std::string knowledge = compose_corpus(g.kb, g.settings.knowledge, wide_to_utf8(question));
     std::string mode = g.settings.strategy;
     std::string session = (g.settings.keep_session || mode == "followup") ? g.session_json : std::string();
     auto history = g.history;
@@ -754,7 +1041,11 @@ void finish_chat(ChatDone* done) {
         std::wstring screen;
         if (!script.empty()) {
             run_actions(script, g.settings.allow_control, report, screen);
-            if (!screen.empty()) g.screen_context = wide_to_utf8(screen);
+            if (!screen.empty()) {
+                g.screen_context = wide_to_utf8(screen);
+                g.reading = last_screen();
+                if (g.desktop_view) SetWindowTextW(g.desktop_view, g.reading.text.c_str());
+            }
             if (!report.empty()) {
                 if (!visible.empty()) visible += L"\n";
                 visible += report;
@@ -1020,9 +1311,9 @@ void paint_button(const DRAWITEMSTRUCT* item) {
     bool chip = item->CtlID == ID_SCREEN || item->CtlID == ID_CONTROL || item->CtlID == ID_TASK;
     bool quiet = item->CtlID == ID_NEW || item->CtlID == ID_SETTINGS || item->CtlID == ID_BACK;
     COLORREF fill = chip ? RGB(39, 39, 44) : quiet ? RGB(32, 32, 36) : RGB(46, 46, 52);
-    bool selected = g.page == 1 && item->CtlID >= ID_NAV0 && item->CtlID <= ID_NAV2 && item->CtlID - ID_NAV0 == g.section;
-    bool armed = item->CtlID == ID_SEND || item->CtlID == ID_PROBE || (item->CtlID == ID_CONTROL && g.settings.allow_control) ||
-                 (item->CtlID == ID_TASK && g.task_mode);
+    bool selected = g.page == 1 && item->CtlID >= ID_NAV0 && item->CtlID <= ID_NAV3 && item->CtlID - ID_NAV0 == g.section;
+    bool armed = item->CtlID == ID_SEND || item->CtlID == ID_PROBE || item->CtlID == ID_RECOGNIZE || (item->CtlID == ID_CONTROL && g.settings.allow_control) ||
+                 (item->CtlID == ID_ARM && g.settings.allow_control) || (item->CtlID == ID_TASK && g.task_mode);
     if (armed) fill = g.accent;
     else if (selected) fill = RGB(62, 62, 70);
     if (item->itemState & ODS_DISABLED) fill = RGB(38, 38, 42);
@@ -1082,6 +1373,132 @@ HWND add_edit(HWND parent, bool composer) {
     return hwnd;
 }
 
+struct RailHit {
+    std::string id;
+    RECT rect{};
+    int action = 0;
+};
+
+std::vector<RailHit> g_hits;
+
+void paint_rail(HWND hwnd) {
+    PAINTSTRUCT paint{};
+    HDC dc = BeginPaint(hwnd, &paint);
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    int width = client.right;
+    int height = client.bottom;
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, std::max(1, width), std::max(1, height));
+    HGDIOBJ old = SelectObject(memory, bitmap);
+    Graphics graphics(memory);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    graphics.Clear(Color(255, 18, 18, 20));
+    FontFamily& family = ui_family();
+    Font title(&family, static_cast<REAL>(S(13)), FontStyleRegular, UnitPixel);
+    Font row_font(&family, static_cast<REAL>(S(14)), FontStyleRegular, UnitPixel);
+    Font meta(&family, static_cast<REAL>(S(12)), FontStyleRegular, UnitPixel);
+    SolidBrush label(Color(255, 150, 150, 158));
+    SolidBrush text(Color(255, 230, 230, 232));
+    SolidBrush dim(Color(255, 140, 140, 148));
+    StringFormat format;
+    format.SetTrimming(StringTrimmingEllipsisCharacter);
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+    graphics.DrawString(Tr(L"rail_chats"), -1, &title, RectF(static_cast<REAL>(S(16)), static_cast<REAL>(S(16)), static_cast<REAL>(width - S(24)), static_cast<REAL>(S(20))), &format, &label);
+    g_hits.clear();
+    int footer = S(126);
+    int list_top = S(44);
+    int list_bottom = std::max(list_top + S(36), height - footer);
+    int row_h = S(36);
+    int content = static_cast<int>(g.library.items.size()) * row_h;
+    int max_scroll = std::max(0, content - (list_bottom - list_top));
+    if (g.rail_scroll > max_scroll) g.rail_scroll = max_scroll;
+    if (g.rail_scroll < 0) g.rail_scroll = 0;
+    int y = list_top - g.rail_scroll;
+    HRGN clip = CreateRectRgn(0, list_top, width, list_bottom);
+    SelectClipRgn(memory, clip);
+    for (const auto& item : g.library.items) {
+        RECT hit{S(8), y, width - S(8), y + row_h - S(4)};
+        if (hit.bottom > list_top && hit.top < list_bottom) {
+            bool active = item.id == g.library.active;
+            if (active) {
+                GraphicsPath path;
+                add_round(path, RectF(static_cast<REAL>(hit.left), static_cast<REAL>(hit.top), static_cast<REAL>(hit.right - hit.left), static_cast<REAL>(hit.bottom - hit.top)), static_cast<float>(S(8)));
+                SolidBrush fill(Color(255, 42, 42, 48));
+                graphics.FillPath(&fill, &path);
+            }
+            std::wstring title = item.title.empty() ? Tr(L"new_chat") : utf8_to_wide(item.title);
+            graphics.DrawString(title.c_str(), -1, &row_font,
+                                RectF(static_cast<REAL>(hit.left + S(10)), static_cast<REAL>(hit.top + S(6)), static_cast<REAL>(hit.right - hit.left - S(16)), static_cast<REAL>(row_h)),
+                                &format, active ? &text : &dim);
+        }
+        if (hit.bottom > list_top && hit.top < list_bottom) {
+            RECT clipped = hit;
+            if (clipped.top < list_top) clipped.top = list_top;
+            if (clipped.bottom > list_bottom) clipped.bottom = list_bottom;
+            g_hits.push_back(RailHit{item.id, clipped, 1});
+        }
+        y += row_h;
+    }
+    SelectClipRgn(memory, nullptr);
+    DeleteObject(clip);
+    auto footer_row = [&](int index, const wchar_t* name, const std::wstring& value) {
+        int top = height - footer + S(8) + index * S(36);
+        RECT hit{S(8), top, width - S(8), top + S(32)};
+        int value_w = hit.right - hit.left - S(108);
+        if (value_w < 10) value_w = 10;
+        graphics.DrawString(name, -1, &meta, RectF(static_cast<REAL>(hit.left + S(8)), static_cast<REAL>(hit.top + S(6)), static_cast<REAL>(S(92)), static_cast<REAL>(S(20))), &format, &label);
+        graphics.DrawString(value.c_str(), -1, &meta,
+                            RectF(static_cast<REAL>(hit.left + S(100)), static_cast<REAL>(hit.top + S(6)), static_cast<REAL>(value_w), static_cast<REAL>(S(20))),
+                            &format, &text);
+        g_hits.push_back(RailHit{"", hit, 2});
+    };
+    std::wstring screen = g.reading.window.empty() ? Tr(L"rail_none") : g.reading.window;
+    wchar_t ocr_count[32];
+    swprintf_s(ocr_count, g.lang == L"zh" ? L"%d 行" : L"%d lines", g.reading.ocr_lines);
+    footer_row(0, Tr(L"rail_screen"), screen);
+    footer_row(1, Tr(L"rail_ocr"), g.reading.ocr_lines ? ocr_count : std::wstring(L"—"));
+    footer_row(2, Tr(L"rail_control"), g.settings.allow_control ? Tr(L"rail_on") : Tr(L"rail_off"));
+    BitBlt(dc, 0, 0, width, height, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    EndPaint(hwnd, &paint);
+}
+
+LRESULT CALLBACK RailProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+    switch (message) {
+        case WM_PAINT:
+            paint_rail(hwnd);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_MOUSEWHEEL: {
+            g.rail_scroll -= GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(36);
+            if (g.rail_scroll < 0) g.rail_scroll = 0;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP: {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            for (const auto& hit : g_hits) {
+                if (!PtInRect(&hit.rect, point)) continue;
+                if (hit.action == 2) go_desktop();
+                else if (message == WM_RBUTTONUP && !hit.id.empty()) {
+                    if (MessageBoxW(g.hwnd, Tr(L"delete_chat"), Tr(L"delete_title"), MB_YESNO | MB_ICONQUESTION) == IDYES) delete_conversation_at(hit.id);
+                } else if (!hit.id.empty()) open_conversation(hit.id);
+                break;
+            }
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wp, lp);
+}
+
 void paint_shell(HWND hwnd) {
     PAINTSTRUCT paint{};
     HDC dc = BeginPaint(hwnd, &paint);
@@ -1137,7 +1554,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             g.hint = add_label(hwnd, false);
             g.new_chat = add_button(hwnd, ID_NEW);
             g.settings_button = add_button(hwnd, ID_SETTINGS);
-            g.chat = CreateWindowExW(0, L"ValhallaChat", L"", WS_CHILD, 0, 0, 10, 10, hwnd, nullptr, g.instance, nullptr);
+            g.chat = CreateWindowExW(0, L"ValhallaChat", L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 10, 10, hwnd, nullptr, g.instance, nullptr);
+            WNDCLASSW rail{};
+            rail.lpfnWndProc = RailProc;
+            rail.hInstance = g.instance;
+            rail.lpszClassName = L"ValhallaRail";
+            rail.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            rail.hbrBackground = g.bg_brush;
+            RegisterClassW(&rail);
+            g.rail = CreateWindowExW(0, L"ValhallaRail", L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 10, 10, hwnd, nullptr, g.instance, nullptr);
             g.composer = add_edit(hwnd, true);
             g.screen_button = add_button(hwnd, ID_SCREEN);
             g.control_button = add_button(hwnd, ID_CONTROL);
@@ -1146,9 +1571,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             g.status = add_label(hwnd, false);
             g.back = add_button(hwnd, ID_BACK);
             g.header = add_label(hwnd, false);
-            for (int i = 0; i < 3; ++i) g.nav[i] = add_button(hwnd, ID_NAV0 + i);
+            for (int i = 0; i < 4; ++i) g.nav[i] = add_button(hwnd, ID_NAV0 + i);
             g.knowledge_title = add_label(hwnd, false);
             g.knowledge_help = add_label(hwnd, true);
+            g.import_button = add_button(hwnd, ID_IMPORT);
             g.knowledge = add_edit(hwnd, false);
             g.models_title = add_label(hwnd, false);
             g.models_help = add_label(hwnd, true);
@@ -1170,6 +1596,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             g.session_help = add_label(hwnd, true);
             g.runtime = add_label(hwnd, true);
             g.probe_button = add_button(hwnd, ID_PROBE);
+            g.desktop_title = add_label(hwnd, false);
+            g.desktop_help = add_label(hwnd, true);
+            g.recognize_button = add_button(hwnd, ID_RECOGNIZE);
+            g.arm_button = add_button(hwnd, ID_ARM);
+            g.desktop_view = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL, 0, 0, 10, 10, hwnd,
+                                             nullptr, g.instance, nullptr);
             SetWindowTheme(g.language, L"DarkMode_CFD", nullptr);
             SetWindowTheme(g.strategy, L"DarkMode_CFD", nullptr);
             SetWindowTheme(g.session_check, L"DarkMode_Explorer", nullptr);
@@ -1179,7 +1611,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             sync_text();
             restore_transcript();
             apply_page();
-            start_framework();
+            set_desktop_owner(hwnd);
+            if (!g.layout_check) start_framework();
             return 0;
         }
         case WM_SIZE:
@@ -1223,15 +1656,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             int code = HIWORD(wp);
             if (code == BN_CLICKED) {
                 if (id == ID_SEND) send_chat();
-                else if (id == ID_SCREEN) {
-                    g.screen_context = wide_to_utf8(read_other_screen());
-                    SetWindowTextW(g.status, Tr(L"screen_done"));
-                } else if (id == ID_CONTROL) {
+                else if (id == ID_SCREEN || id == ID_RECOGNIZE) recognize_now();
+                else if (id == ID_CONTROL || id == ID_ARM) {
                     g.settings.allow_control = !g.settings.allow_control;
                     save_now();
                     SetWindowTextW(g.control_button, g.settings.allow_control ? Tr(L"control_on") : Tr(L"control"));
+                    SetWindowTextW(g.arm_button, g.settings.allow_control ? Tr(L"arm_on") : Tr(L"arm_off"));
                     InvalidateRect(g.control_button, nullptr, TRUE);
-                }                 else if (id == ID_TASK) {
+                    InvalidateRect(g.arm_button, nullptr, TRUE);
+                    if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
+                } else if (id == ID_TASK) {
                     g.task_mode = !g.task_mode;
                     SetWindowTextW(g.task_button, g.task_mode ? Tr(L"task_on") : Tr(L"task"));
                     InvalidateRect(g.task_button, nullptr, TRUE);
@@ -1248,10 +1682,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
                             if (!PostMessageW(owner, WM_PROBE_DONE, 0, reinterpret_cast<LPARAM>(report))) delete report;
                         }).detach();
                     }
-                } else if (id == ID_NEW) clear_chat();
+                } else if (id == ID_IMPORT) import_industry_dialog(hwnd);
+                else if (id == ID_NEW) new_conversation();
                 else if (id == ID_SETTINGS) go_settings();
                 else if (id == ID_BACK) go_chat();
-                else if (id >= ID_NAV0 && id <= ID_NAV2) remember_knowledge_and(id - ID_NAV0);
+                else if (id >= ID_NAV0 && id <= ID_NAV3) remember_knowledge_and(id - ID_NAV0);
                 else if (id == ID_SESSION) {
                     g.settings.keep_session = SendMessageW(g.session_check, BM_GETCHECK, 0, 0) == BST_CHECKED;
                     save_now();
@@ -1379,6 +1814,88 @@ int run_memory_check() {
     return first.error.empty() && second.error.empty() && remembered ? 0 : 1;
 }
 
+bool style_visible(HWND hwnd) {
+    return hwnd && (GetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE);
+}
+
+bool controls_overlap(HWND left, HWND right) {
+    if (!style_visible(left) || !style_visible(right)) return false;
+    RECT a{};
+    RECT b{};
+    RECT hit{};
+    GetWindowRect(left, &a);
+    GetWindowRect(right, &b);
+    if (!IntersectRect(&hit, &a, &b)) return false;
+    return hit.right - hit.left > 2 && hit.bottom - hit.top > 2;
+}
+
+bool control_inside(HWND parent, HWND child) {
+    if (!style_visible(child)) return false;
+    RECT rect{};
+    GetWindowRect(child, &rect);
+    MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&rect), 2);
+    RECT client{};
+    GetClientRect(parent, &client);
+    return rect.left >= -2 && rect.top >= -2 && rect.right <= client.right + 2 && rect.bottom <= client.bottom + 2 && rect.right - rect.left > 8 && rect.bottom - rect.top > 8;
+}
+
+bool audit_one(HWND hwnd, int width, int height, std::wstring& log) {
+    SetWindowPos(hwnd, nullptr, 30, 30, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    g.page = 0;
+    g.section = 0;
+    apply_page();
+    auto fail = [&](const wchar_t* why) {
+        wchar_t line[160];
+        swprintf_s(line, L"%dx%d %s\n", width, height, why);
+        log += line;
+        return false;
+    };
+    if (!style_visible(g.rail) || !control_inside(hwnd, g.rail)) return fail(L"conversation list is missing");
+    if (!control_inside(hwnd, g.chat) || !control_inside(hwnd, g.composer) || !control_inside(hwnd, g.send)) return fail(L"chat surface is outside the window");
+    if (!control_inside(hwnd, g.screen_button) || !control_inside(hwnd, g.control_button) || !control_inside(hwnd, g.task_button)) return fail(L"toolbar is outside the window");
+    if (!control_inside(hwnd, g.title) || !control_inside(hwnd, g.new_chat) || !control_inside(hwnd, g.settings_button)) return fail(L"header is outside the window");
+    RECT rail{};
+    RECT chat{};
+    RECT title{};
+    RECT newer{};
+    RECT composer{};
+    RECT tools{};
+    GetWindowRect(g.rail, &rail);
+    GetWindowRect(g.chat, &chat);
+    GetWindowRect(g.title, &title);
+    GetWindowRect(g.new_chat, &newer);
+    GetWindowRect(g.composer, &composer);
+    GetWindowRect(g.screen_button, &tools);
+    if (chat.left + 1 < rail.right) return fail(L"chat overlaps the conversation list");
+    if (title.left + 1 < rail.right) return fail(L"title overlaps the conversation list");
+    if (title.right > newer.left + 1) return fail(L"title overlaps new chat");
+    if (composer.bottom > tools.top + 1) return fail(L"composer overlaps the toolbar");
+    if (controls_overlap(g.screen_button, g.control_button) || controls_overlap(g.control_button, g.task_button) || controls_overlap(g.task_button, g.send) ||
+        controls_overlap(g.screen_button, g.send) || controls_overlap(g.control_button, g.send)) {
+        return fail(L"toolbar buttons overlap");
+    }
+    g.page = 1;
+    g.section = 3;
+    apply_page();
+    if (style_visible(g.rail)) return fail(L"conversation list stays open over settings");
+    if (!control_inside(hwnd, g.desktop_view) || !control_inside(hwnd, g.recognize_button) || !control_inside(hwnd, g.arm_button)) return fail(L"screen module is outside the window");
+    if (controls_overlap(g.recognize_button, g.arm_button)) return fail(L"screen module buttons overlap");
+    for (int i = 0; i < 4; ++i) {
+        if (!control_inside(hwnd, g.nav[i])) return fail(L"settings navigation is outside the window");
+        for (int j = i + 1; j < 4; ++j) {
+            if (controls_overlap(g.nav[i], g.nav[j])) return fail(L"settings navigation overlaps");
+        }
+    }
+    return true;
+}
+
+bool audit_layout(HWND hwnd, std::wstring& log) {
+    bool wide = audit_one(hwnd, 1280, 800, log);
+    bool narrow = audit_one(hwnd, 1100, 720, log);
+    if (wide && narrow) log += L"OK\n";
+    return wide && narrow;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1387,10 +1904,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     bool check = false;
     bool memory_check = false;
     bool feature_check = false;
+    bool layout_check = false;
     for (int i = 0; i < argc; ++i) {
         if (wcscmp(argv[i], L"--check") == 0) check = true;
         if (wcscmp(argv[i], L"--memory-check") == 0) memory_check = true;
         if (wcscmp(argv[i], L"--feature-check") == 0) feature_check = true;
+        if (wcscmp(argv[i], L"--layout-check") == 0) layout_check = true;
     }
     if (argv) LocalFree(argv);
     if (feature_check) {
@@ -1411,8 +1930,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     g.instance = instance;
     g.settings_path = exe_dir() + L"\\settings.json";
-    g.transcript_path = exe_dir() + L"\\conversation.json";
+    g.library.root = exe_dir() + L"\\conversations";
+    bool library_existed = load_library(g.library);
+    if (!library_existed) import_legacy(g.library, exe_dir() + L"\\conversation.json");
+    g.transcript_path = conversation_file(g.library, g.library.active);
+    g.kb_path = exe_dir() + L"\\knowledge.json";
     g.settings = load_settings(g.settings_path);
+    load_knowledge(g.kb_path, g.kb);
+    sync_notes(g.kb, g.settings.knowledge);
+    save_knowledge(g.kb_path, g.kb);
     g.lang = resolved_language(g.settings.language);
     read_accent();
     g.bg_brush = CreateSolidBrush(RGB(24, 24, 26));
@@ -1452,8 +1978,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     height = std::min(height, work_h);
     int x = work.left + std::max(0, (static_cast<int>(work.right - work.left) - width) / 2);
     int y = work.top + std::max(0, (static_cast<int>(work.bottom - work.top) - height) / 2);
+    g.layout_check = layout_check;
     HWND hwnd = CreateWindowExW(0, L"ValhallaWindow", L"Valhalla", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width, height,
                                 nullptr, nullptr, instance, nullptr);
+    if (layout_check) {
+        std::wstring log;
+        bool ok = hwnd && audit_layout(hwnd, log);
+        if (!ok && log.empty()) log = L"window was not created\n";
+        std::string body = wide_to_utf8(log);
+        HANDLE file = CreateFileW((exe_dir() + L"\\native-layout.txt").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            DWORD wrote = 0;
+            WriteFile(file, body.data(), static_cast<DWORD>(body.size()), &wrote, nullptr);
+            CloseHandle(file);
+        }
+        if (hwnd) DestroyWindow(hwnd);
+        GdiplusShutdown(g.gdi);
+        return ok ? 0 : 1;
+    }
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
     MSG msg{};

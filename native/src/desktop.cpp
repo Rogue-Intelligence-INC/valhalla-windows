@@ -1,14 +1,19 @@
 #include "desktop.h"
+#include "ocr.h"
 
 #include <UIAutomation.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 namespace {
 
 thread_local bool g_com = false;
+HWND g_owner = nullptr;
+ScreenReading g_last;
+bool g_busy = false;
 
 void ensure_com() {
     if (g_com) return;
@@ -23,26 +28,68 @@ struct ComRelease {
     }
 };
 
-void append_limited(std::wstring& out, const std::wstring& line) {
-    if (line.empty() || out.size() > 5000) return;
-    if (out.find(line) != std::wstring::npos) return;
-    out += line;
-    out += L"\n";
+struct Reveal {
+    HWND hwnd = nullptr;
+    bool hidden = false;
+    ~Reveal() {
+        if (hidden && hwnd) {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    }
+};
+
+const wchar_t* kind_of(CONTROLTYPEID type) {
+    switch (type) {
+        case UIA_ButtonControlTypeId: return L"button";
+        case UIA_EditControlTypeId: return L"edit";
+        case UIA_TextControlTypeId: return L"text";
+        case UIA_DocumentControlTypeId: return L"document";
+        case UIA_HyperlinkControlTypeId: return L"link";
+        case UIA_ListItemControlTypeId: return L"item";
+        case UIA_TabItemControlTypeId: return L"tab";
+        case UIA_CheckBoxControlTypeId: return L"check";
+        case UIA_ComboBoxControlTypeId: return L"combo";
+        case UIA_MenuItemControlTypeId: return L"menu";
+        case UIA_ImageControlTypeId: return L"image";
+        case UIA_WindowControlTypeId: return L"window";
+        default: return nullptr;
+    }
 }
 
-void walk(IUIAutomationTreeWalker* walker, IUIAutomationElement* element, std::wstring& out, int depth) {
-    if (!element || depth > 8 || out.size() > 5000) return;
-    VARIANT name;
-    VariantInit(&name);
-    if (SUCCEEDED(element->GetCurrentPropertyValue(UIA_NamePropertyId, &name)) && name.vt == VT_BSTR && name.bstrVal &&
-        name.bstrVal[0]) {
-        append_limited(out, name.bstrVal);
+void add_element(std::vector<ScreenElement>& elements, const wchar_t* kind, const std::wstring& name, RECT bounds) {
+    if (!kind || elements.size() >= 120) return;
+    int w = bounds.right - bounds.left;
+    int h = bounds.bottom - bounds.top;
+    if (w < 2 || h < 2 || w > 4000 || h > 3000) return;
+    ScreenElement element;
+    element.kind = kind;
+    element.name = name.empty() ? kind : name;
+    element.x = bounds.left;
+    element.y = bounds.top;
+    element.w = w;
+    element.h = h;
+    elements.push_back(std::move(element));
+}
+
+void walk(IUIAutomationTreeWalker* walker, IUIAutomationElement* element, std::vector<ScreenElement>& elements, int depth) {
+    if (!element || depth > 14 || elements.size() >= 120) return;
+    CONTROLTYPEID type = 0;
+    element->get_CurrentControlType(&type);
+    const wchar_t* kind = kind_of(type);
+    RECT bounds{};
+    element->get_CurrentBoundingRectangle(&bounds);
+    BSTR name = nullptr;
+    element->get_CurrentName(&name);
+    std::wstring label = name ? name : L"";
+    if (name) SysFreeString(name);
+    if (kind && (!label.empty() || type == UIA_EditControlTypeId || type == UIA_DocumentControlTypeId)) {
+        add_element(elements, kind, label, bounds);
     }
-    VariantClear(&name);
     IUIAutomationElement* child = nullptr;
     if (FAILED(walker->GetFirstChildElement(element, &child))) return;
-    while (child) {
-        walk(walker, child, out, depth + 1);
+    while (child && elements.size() < 120) {
+        walk(walker, child, elements, depth + 1);
         IUIAutomationElement* next = nullptr;
         walker->GetNextSiblingElement(child, &next);
         child->Release();
@@ -50,25 +97,101 @@ void walk(IUIAutomationTreeWalker* walker, IUIAutomationElement* element, std::w
     }
 }
 
-HWND target_window() {
+struct Capture {
+    std::vector<unsigned char> pixels;
+    int width = 0;
+    int height = 0;
+    int origin_x = 0;
+    int origin_y = 0;
+    int source_w = 0;
+    int source_h = 0;
+};
+
+Capture capture_rect(int left, int top, int width, int height) {
+    Capture shot;
+    if (width < 8 || height < 8) return shot;
+    int dest_w = width;
+    int dest_h = height;
+    const int cap = 1600;
+    if (width > cap || height > cap) {
+        double scale = static_cast<double>(cap) / static_cast<double>(std::max(width, height));
+        dest_w = std::max(8, static_cast<int>(width * scale));
+        dest_h = std::max(8, static_cast<int>(height * scale));
+    }
+    HDC screen = GetDC(nullptr);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = dest_w;
+    info.bmiHeader.biHeight = -dest_h;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC memory = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(memory, dib);
+    SetStretchBltMode(memory, HALFTONE);
+    StretchBlt(memory, 0, 0, dest_w, dest_h, screen, left, top, width, height, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    if (bits) {
+        shot.pixels.assign(static_cast<const unsigned char*>(bits), static_cast<const unsigned char*>(bits) + static_cast<size_t>(dest_w) * dest_h * 4);
+        shot.width = dest_w;
+        shot.height = dest_h;
+        shot.origin_x = left;
+        shot.origin_y = top;
+        shot.source_w = width;
+        shot.source_h = height;
+    }
+    if (dib) DeleteObject(dib);
+    return shot;
+}
+
+HWND other_window(HWND own) {
     HWND foreground = GetForegroundWindow();
-    DWORD foreground_pid = 0;
-    GetWindowThreadProcessId(foreground, &foreground_pid);
-    if (foreground_pid != GetCurrentProcessId()) return foreground;
+    if (foreground && foreground != own && IsWindowVisible(foreground)) return foreground;
     HWND best = nullptr;
+    struct Pick {
+        HWND own;
+        HWND best;
+    } pick{own, nullptr};
     EnumWindows(
         [](HWND hwnd, LPARAM param) -> BOOL {
-            if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+            auto* state = reinterpret_cast<Pick*>(param);
+            if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || hwnd == state->own) return TRUE;
             DWORD pid = 0;
             GetWindowThreadProcessId(hwnd, &pid);
             if (pid == GetCurrentProcessId()) return TRUE;
-            wchar_t title[8] = {};
-            if (GetWindowTextW(hwnd, title, 8) == 0) return TRUE;
-            *reinterpret_cast<HWND*>(param) = hwnd;
+            wchar_t title[4] = {};
+            if (GetWindowTextW(hwnd, title, 4) == 0) return TRUE;
+            state->best = hwnd;
             return FALSE;
         },
-        reinterpret_cast<LPARAM>(&best));
-    return best ? best : foreground;
+        reinterpret_cast<LPARAM>(&pick));
+    best = pick.best;
+    return best ? best : GetDesktopWindow();
+}
+
+std::wstring quote_name(const std::wstring& name) {
+    std::wstring out;
+    for (wchar_t ch : name) {
+        if (ch == L'\n' || ch == L'\r' || ch == L'\t') out.push_back(L' ');
+        else out.push_back(ch);
+        if (out.size() > 80) break;
+    }
+    return out;
+}
+
+void append_line(std::wstring& text, const std::wstring& line) {
+    if (text.size() > 7000) return;
+    text += line;
+    text += L"\n";
+}
+
+std::wstring fold_copy(std::wstring text) {
+    for (wchar_t& ch : text) ch = static_cast<wchar_t>(towlower(ch));
+    return text;
 }
 
 bool on_screen(int x, int y) {
@@ -138,29 +261,155 @@ std::wstring trim_line(std::wstring text) {
     return text;
 }
 
+void map_box(ScreenElement& element, const Capture& shot) {
+    if (shot.source_w <= 0 || shot.source_h <= 0 || shot.width <= 0 || shot.height <= 0) return;
+    element.x = shot.origin_x + element.x * shot.source_w / shot.width;
+    element.y = shot.origin_y + element.y * shot.source_h / shot.height;
+    element.w = std::max(1, element.w * shot.source_w / shot.width);
+    element.h = std::max(1, element.h * shot.source_h / shot.height);
+}
+
 }  // namespace
 
-std::wstring read_other_screen() {
-    ensure_com();
-    HWND hwnd = target_window();
-    wchar_t title[512] = {};
-    GetWindowTextW(hwnd, title, 512);
-    std::wstring out = L"Window: ";
-    out += title;
-    out += L"\n";
-    IUIAutomation* automation = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) || !automation) {
-        return out;
+void set_desktop_owner(void* hwnd) {
+    g_owner = reinterpret_cast<HWND>(hwnd);
+}
+
+bool locate_element(const std::vector<ScreenElement>& elements, const std::wstring& label, int& x, int& y) {
+    std::wstring key = fold_copy(trim_line(label));
+    if (key.empty()) return false;
+    const ScreenElement* best = nullptr;
+    size_t best_size = 0;
+    for (const auto& element : elements) {
+        if (element.w <= 0 || element.h <= 0) continue;
+        std::wstring name = fold_copy(element.name);
+        if (name.find(key) == std::wstring::npos) continue;
+        if (!best || name.size() < best_size) {
+            best = &element;
+            best_size = name.size();
+        }
     }
-    ComRelease automation_release{automation};
-    IUIAutomationElement* root = nullptr;
-    if (FAILED(automation->ElementFromHandle(hwnd, &root)) || !root) return out;
-    ComRelease root_release{root};
-    IUIAutomationTreeWalker* walker = nullptr;
-    if (FAILED(automation->get_ControlViewWalker(&walker)) || !walker) return out;
-    ComRelease walker_release{walker};
-    walk(walker, root, out, 0);
-    return out;
+    if (!best) return false;
+    x = best->x + best->w / 2;
+    y = best->y + best->h / 2;
+    return true;
+}
+
+ScreenReading last_screen() {
+    return g_last;
+}
+
+ScreenReading recognize_screen(void* own_window) {
+    ScreenReading reading;
+    if (g_busy) {
+        reading.error = L"busy";
+        return g_last;
+    }
+    g_busy = true;
+    HWND own = reinterpret_cast<HWND>(own_window);
+    Reveal reveal;
+    if (own && IsWindow(own) && IsWindowVisible(own)) {
+        reveal.hwnd = own;
+        reveal.hidden = true;
+        ShowWindow(own, SW_HIDE);
+        Sleep(180);
+    }
+    HWND target = other_window(own);
+    wchar_t title[512] = {};
+    GetWindowTextW(target, title, 512);
+    reading.window = title[0] ? title : L"Desktop";
+    RECT rect{};
+    GetWindowRect(target, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    int left = rect.left;
+    int top = rect.top;
+    if (width < 40 || height < 40 || left < -10000) {
+        left = 0;
+        top = 0;
+        width = GetSystemMetrics(SM_CXSCREEN);
+        height = GetSystemMetrics(SM_CYSCREEN);
+        reading.window = L"Desktop";
+    }
+    ensure_com();
+    IUIAutomation* automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) && automation) {
+        ComRelease automation_release{automation};
+        IUIAutomationElement* root = nullptr;
+        if (SUCCEEDED(automation->ElementFromHandle(target, &root)) && root) {
+            ComRelease root_release{root};
+            IUIAutomationTreeWalker* walker = nullptr;
+            if (SUCCEEDED(automation->get_ControlViewWalker(&walker)) && walker) {
+                ComRelease walker_release{walker};
+                walk(walker, root, reading.elements, 0);
+            }
+        }
+    }
+    Capture shot = capture_rect(left, top, width, height);
+    reveal.hidden = false;
+    if (reveal.hwnd) {
+        ShowWindow(reveal.hwnd, SW_SHOW);
+        SetForegroundWindow(reveal.hwnd);
+        reveal.hwnd = nullptr;
+    }
+    reading.controls = static_cast<int>(reading.elements.size());
+    if (!shot.pixels.empty()) {
+        OcrPass ocr = recognize_bgra(shot.pixels.data(), shot.width, shot.height, shot.width * 4);
+        if (!ocr.ok) reading.error = ocr.error;
+        for (auto& line : ocr.lines) {
+            ScreenElement element;
+            element.kind = L"ocr";
+            element.name = line.text;
+            element.x = line.x;
+            element.y = line.y;
+            element.w = line.w;
+            element.h = line.h;
+            map_box(element, shot);
+            reading.elements.push_back(element);
+            ++reading.ocr_lines;
+        }
+        for (auto& word : ocr.words) {
+            if (reading.elements.size() >= 240) break;
+            ScreenElement element;
+            element.kind = L"ocr";
+            element.name = word.text;
+            element.x = word.x;
+            element.y = word.y;
+            element.w = word.w;
+            element.h = word.h;
+            map_box(element, shot);
+            reading.elements.push_back(std::move(element));
+        }
+    } else {
+        reading.error = L"screen capture failed";
+    }
+    append_line(reading.text, L"Window: " + reading.window);
+    append_line(reading.text, L"Controls:");
+    int listed = 0;
+    for (const auto& element : reading.elements) {
+        if (element.kind == L"ocr") continue;
+        wchar_t line[256];
+        swprintf_s(line, L"%s \"%s\" @ %d,%d %dx%d", element.kind.c_str(), quote_name(element.name).c_str(), element.x, element.y, element.w, element.h);
+        append_line(reading.text, line);
+        if (++listed >= 80) break;
+    }
+    append_line(reading.text, L"OCR:");
+    int ocr_listed = 0;
+    for (const auto& element : reading.elements) {
+        if (element.kind != L"ocr") continue;
+        wchar_t line[256];
+        swprintf_s(line, L"\"%s\" @ %d,%d %dx%d", quote_name(element.name).c_str(), element.x, element.y, element.w, element.h);
+        append_line(reading.text, line);
+        if (++ocr_listed >= 80) break;
+    }
+    if (!reading.error.empty()) append_line(reading.text, L"OCR note: " + reading.error);
+    g_last = reading;
+    g_busy = false;
+    return reading;
+}
+
+std::wstring read_other_screen() {
+    return recognize_screen(g_owner).text;
 }
 
 std::wstring strip_actions(const std::wstring& answer, std::wstring& script) {
@@ -184,9 +433,20 @@ bool run_actions(const std::wstring& script, bool allow_control, std::wstring& r
         cursor = end == std::wstring::npos ? script.size() : end + 1;
         if (line.empty() || line == L"[[action]]") continue;
         if (line == L"read_screen") {
-            screen = read_other_screen();
-            report += L"读取屏幕\n";
+            ScreenReading reading = recognize_screen(g_owner);
+            screen = reading.text;
+            report += L"识别屏幕\n";
             any = true;
+            continue;
+        }
+        if (line.rfind(L"click_text ", 0) == 0) {
+            int x = 0;
+            int y = 0;
+            if (locate_element(g_last.elements, line.substr(11), x, y) && on_screen(x, y)) {
+                click_at(x, y);
+                report += line + L"\n";
+                any = true;
+            }
             continue;
         }
         if (line.rfind(L"click ", 0) == 0 || line.rfind(L"move ", 0) == 0) {
